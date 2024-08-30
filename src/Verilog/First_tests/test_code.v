@@ -20,14 +20,8 @@ reg [7:0] tabla_actual [0:255];      // Selected waveform LUT
 reg [31:0] counter = 0;              // Counter for PWM frequency generation
 reg [7:0] lut_addr = 0;              // Address for LUT
 reg [31:0] freq;                     // Frequency control
-
-reg white_noise_enable = 0;          // Enable/disable white noise
 reg [1:0] filter_level = 2'b00;      // 2-bit for 3 filter levels + off
 reg adsr_active = 0;                 // Enable/disable ADSR
-
-// Filters
-reg [7:0] filter_taps [0:4];         // Filter taps for convolution
-reg [7:0] filtered_output;           // Output of the filter
 
 // Initializing the LUTs
 initial begin
@@ -54,13 +48,6 @@ initial begin
 
     // Default to the sine wave LUT
     tabla_actual = tabla_seno;
-
-    // Initialize filter taps to zero
-    filter_taps[0] = 0;
-    filter_taps[1] = 0;
-    filter_taps[2] = 0;
-    filter_taps[3] = 0;
-    filter_taps[4] = 0;
 end
 
 // Clock frequency in hertz
@@ -139,16 +126,6 @@ adsr adsr_inst (
 
 // Filter FIR controlled by UART
 always @(posedge clk1) begin
-    if (rst) begin
-        counter <= 0;
-        pwm_out <= 0;
-        filter_taps[0] <= 0;
-        filter_taps[1] <= 0;
-        filter_taps[2] <= 0;
-        filter_taps[3] <= 0;
-        filter_taps[4] <= 0;
-        filtered_output <= 0;
-    end else begin
         if (uart_rx_valid) begin
             case (uart_rx_data[7:0])
                 8'b00110000: freq <= freq_map[0]; // '0'
@@ -164,9 +141,6 @@ always @(posedge clk1) begin
                 8'b01000011: tabla_actual <= tabla_triangular;    // 'C'
                 8'b01000100: tabla_actual <= tabla_diente_sierra; // 'D'
                 8'b01001000: white_noise_enable <= ~white_noise_enable; // 'H' Toggle white noise
-                8'b01001001: filter_level <= 2'b01; // 'I' Set filter level 1 (low)
-                8'b01001010: filter_level <= 2'b10; // 'J' Set filter level 2 (mid)
-                8'b01001011: filter_level <= 2'b11; // 'K' Set filter level 3 (high)
                 8'b01001100: adsr_active <= 1; // 'L' Enable ADSR
                 8'b01001101: adsr_active <= 0; // 'M' Disable ADSR
             endcase
@@ -181,17 +155,6 @@ always @(posedge clk1) begin
             end
         end
 
-        // Apply filter
-        filter_taps[4:1] <= filter_taps[3:0];
-        filter_taps[0] <= tabla_actual[lut_addr];
-
-        case (filter_level)
-            2'b00: filtered_output <= filter_taps[0]; // No filter
-            2'b01: filtered_output <= (filter_taps[0] + filter_taps[1] + filter_taps[2] + filter_taps[3] + filter_taps[4]) / 5; // Low
-            2'b10: filtered_output <= (filter_taps[0] + 2*filter_taps[1] + filter_taps[2] + 2*filter_taps[3] + filter_taps[4]) / 7; // Mid
-            2'b11: filtered_output <= (filter_taps[0] + 3*filter_taps[1] + 4*filter_taps[2] + 3*filter_taps[3] + filter_taps[4]) / 12; // High
-        endcase
-
         if (adsr_active) begin
             pwm_out <= (adsr_out > counter[7:0]) ? 1 : 0; // Ensure 8-bit comparison
         end else if (white_noise_enable) begin
@@ -199,7 +162,6 @@ always @(posedge clk1) begin
         end else begin
             pwm_out <= (filtered_output > counter[7:0]) ? 1 : 0; // Ensure 8-bit comparison
         end
-    end
 end
 
 // UART RX
