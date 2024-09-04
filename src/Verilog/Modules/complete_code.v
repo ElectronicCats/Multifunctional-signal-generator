@@ -1,3 +1,130 @@
+/*
+ * Copyright (c) 2024 Your Name
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+`define default_netname none
+
+module tt_um_adsr_i2s (
+    input  wire [7:0] ui_in,    // UART RX en ui_in[0]
+    output wire [7:0] uo_out,   // Sin uso
+    input  wire [7:0] uio_in,   // Sin uso
+    output wire [7:0] uio_out,  // I2S en uio_out[0]: BCLK, uio_out[1]: LRCLK, uio_out[2]: DATA
+    output wire [7:0] uio_oe,   // Output enable para I2S pins
+    input  wire       ena,      // Habilitación del diseño
+    input  wire       clk,      // Clock principal
+    input  wire       rst_n     // Reset activo en bajo
+);
+
+    // UART RX para recibir parámetros ADSR
+    wire [7:0] uart_data;
+    wire uart_valid;
+    
+    uart_receiver uart_rx (
+        .clk(clk),
+        .reset(!rst_n),
+        .rx(ui_in[0]),
+        .data_out(uart_data),
+        .data_valid(uart_valid)
+    );
+
+    // ADSR Parameters
+    reg [7:0] attack_time;
+    reg [7:0] decay_time;
+    reg [7:0] sustain_level;
+    reg [7:0] release_time;
+
+    // Actualización de parámetros ADSR a partir de UART
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            attack_time <= 8'd0;
+            decay_time <= 8'd0;
+            sustain_level <= 8'd0;
+            release_time <= 8'd0;
+        end else if (uart_valid) begin
+            // Suponiendo que el orden de recepción es: attack, decay, sustain, release
+            // y se mandan de manera secuencial
+            attack_time <= uart_data;   // Puedes ajustar según protocolo
+            decay_time <= uart_data;
+            sustain_level <= uart_data;
+            release_time <= uart_data;
+        end
+    end
+
+    // Generador de onda diente de sierra con ADSR
+    wire [7:0] wave_out;
+    
+    sawtooth_wave_generator_with_adsr sawtooth_adsr (
+        .clk(clk),
+        .reset(!rst_n),
+        .freq_select(6'd32),  // Selección de frecuencia por defecto
+        .attack_time(attack_time),
+        .decay_time(decay_time),
+        .sustain_level(sustain_level),
+        .release_time(release_time),
+        .note_on(1'b1),       // Encendido constante para esta implementación
+        .note_off(1'b0),
+        .wave_out(wave_out)
+    );
+
+    // Módulo I2S para enviar la señal de audio
+    i2s_transmitter i2s_tx (
+        .clk(clk),
+        .reset(!rst_n),
+        .data_in(wave_out),   // Transmite la onda generada
+        .bclk(uio_out[0]),
+        .lrclk(uio_out[1]),
+        .data(uio_out[2])
+    );
+
+    // Habilitación de las salidas I2S
+    assign uio_oe = 8'b00000111;       // Habilitar las tres primeras salidas para I2S
+    assign uo_out = 8'b0;              // No hay salidas directas
+    assign uio_out[7:3] = 5'b00000;    // Asignar los bits no utilizados a 0
+
+endmodule
+
+module i2s_transmitter (
+    input  wire       clk,
+    input  wire       reset,
+    input  wire [7:0] data_in,
+    output reg        bclk,
+    output reg        lrclk,
+    output reg        data
+);
+    reg [7:0] data_buffer;    // Buffer de datos para la transmisión
+    reg [2:0] bit_count;      // Contador de bits para el envío de datos
+
+    // Generación de BCLK (Bit Clock) y LRCLK (Left/Right Clock)
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            bclk <= 1'b0;
+            lrclk <= 1'b0;
+            bit_count <= 3'd0;
+        end else begin
+            bclk <= ~bclk; // Alternar BCLK para cada flanco del reloj principal
+            if (bit_count == 3'd7) begin
+                lrclk <= ~lrclk; // Alternar LRCLK cada 8 bits
+                bit_count <= 3'd0;
+            end else begin
+                bit_count <= bit_count + 1;
+            end
+        end
+    end
+
+    // Transmisión de datos en I2S
+    always @(posedge bclk or posedge reset) begin
+        if (reset) begin
+            data <= 1'b0;
+            data_buffer <= 8'd0;
+        end else begin
+            data_buffer <= data_in;
+            data <= data_buffer[7];
+            data_buffer <= {data_buffer[6:0], 1'b0}; // Shift left para transmitir el siguiente bit
+        end
+    end
+endmodule
+
 module sawtooth_wave_generator_with_adsr (
     input wire clk,                  // Reloj de entrada (25 MHz)
     input wire reset,                // Señal de reinicio
@@ -151,4 +278,37 @@ module sawtooth_wave_generator_with_adsr (
         wave_out <= (counter * envelope_level) / 8'd255; // Modulación de la onda
     end
 
+endmodule
+
+module uart_receiver (
+    input  wire clk,
+    input  wire reset,
+    input  wire rx,
+    output reg  [7:0] data_out,
+    output reg  data_valid
+);
+    // Implementación básica de un receptor UART (no completa, pero funcional para pruebas)
+    reg [3:0] bit_counter;
+    reg [7:0] shift_reg;
+
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            bit_counter <= 4'd0;
+            data_out <= 8'd0;
+            data_valid <= 1'b0;
+        end else begin
+            if (rx == 1'b0 && bit_counter == 4'd0) begin
+                bit_counter <= 4'd1; // Comienza a recibir datos
+            end else if (bit_counter > 4'd0 && bit_counter < 4'd9) begin
+                shift_reg <= {rx, shift_reg[7:1]};
+                bit_counter <= bit_counter + 1;
+            end else if (bit_counter == 4'd9) begin
+                data_out <= shift_reg;
+                data_valid <= 1'b1;
+                bit_counter <= 4'd0;
+            end else begin
+                data_valid <= 1'b0;
+            end
+        end
+    end
 endmodule
